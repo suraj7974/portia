@@ -184,7 +184,9 @@ def run(
     portia = Portia(
         config=config,
         tools=(
-            registry.match_tools(tool_ids=[cli_config.tool_id]) if cli_config.tool_id else registry
+            registry.match_tools(tool_ids=[cli_config.tool_id])
+            if cli_config.tool_id
+            else registry
         ),
         execution_hooks=CLIExecutionHooks(),
     )
@@ -244,10 +246,38 @@ def _get_config(
     return (cli_config, config)
 
 
+@click.command()
+@click.option(
+    "--smart",
+    is_flag=True,
+    default=True,
+    help="Use smart workflow generator (creates complete workflows with nodes)",
+)
+@common_options
+def workflow(
+    smart: bool,
+    **kwargs,  # noqa: ANN003
+) -> None:
+    """Interactive n8n workflow generator."""
+    try:
+        # Always use the smart workflow generator now
+        from portia.smart_workflow_generator import SmartWorkflowGenerator
+
+        generator = SmartWorkflowGenerator()
+        generator.start_interactive_workflow()
+    except ImportError as e:
+        click.echo(f"❌ Import error: {e}")
+        click.echo("Make sure all dependencies are installed")
+    except Exception as e:
+        click.echo(f"❌ Error: {e}")
+        sys.exit(1)
+
+
 cli.add_command(version)
 cli.add_command(run)
 cli.add_command(plan)
 cli.add_command(list_tools)
+cli.add_command(workflow)
 
 if __name__ == "__main__":
     cli(obj={})

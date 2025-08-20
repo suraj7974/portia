@@ -11,3 +11,5 @@ docs
 .portia
 scratch
 .DS_Store
+
+node_modules
