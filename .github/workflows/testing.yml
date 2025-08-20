@@ -1,0 +1,60 @@
+name: Python Testing
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - labeled
+
+# Add concurrency to cancel in-progress runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  testing:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest-16core
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: install uv
+        run: pipx install uv
+
+      # https://github.com/pydantic/ollama-action
+      - uses: pydantic/ollama-action@v3
+        with:
+          model: qwen2.5:0.5b
+
+      - name: install dependencies
+        run: uv sync --all-extras
+
+      - name: unit_tests + coverage
+        env:
+          PORTIA_API_ENDPOINT: "https://api.porita.dev"
+        run: |
+          set -o pipefail
+          uv run pytest tests/unit -n auto --cov
+
+      - name: integration_tests + coverage
+        env:
+          PORTIA_API_ENDPOINT: "https://api.porita.dev"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          PORTIA_API_KEY: ${{ secrets.PORTIA_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
+          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        run: |
+          set -o pipefail
+          uv run pytest tests/integration -m "not daily" -n auto --cov --cov-append --cov-fail-under 100 --log-cli-level=WARNING --junitxml=pytest.xml | tee pytest-coverage.txt

@@ -1,0 +1,203 @@
+name: Run Evals for portia-sdk-python
+
+# Note: Any changes made here should be reflected in the evals.yml file in the platform repo
+# Actions from private repos are inaccessible from public repos
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - synchronize
+      - labeled
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    # Skip PRs unless they have the 'ready_to_eval' label
+    if: >
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ready_to_eval')
+    steps:
+      - name: Checkout portia-sdk-python repo
+        uses: actions/checkout@v4
+        with:
+          path: portia-sdk-python
+          repository: portiaAI/portia-sdk-python
+          # For push events, use github.ref_name (branch name that was pushed)
+          # For pull_request_target, use github.event.pull_request.head.ref (PR branch)
+          # For workflow_dispatch, use github.ref_name
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.ref || github.ref_name }}
+          token: ${{ secrets.PORTIA_GH_TOKEN }}
+
+      - name: Checkout platform repo
+        uses: actions/checkout@v4
+        with:
+          path: platform
+          repository: portiaAI/platform
+          token: ${{ secrets.PORTIA_GH_TOKEN }}
+
+      - name: Install UV
+        run: pip install uv
+
+      - name: Install dependencies to SteelThread
+        working-directory: ./platform/steel_thread
+        run: |
+          uv add "portia-sdk-python[all] @ file://../../portia-sdk-python"
+
+      - name: Install dependencies to Evals
+        working-directory: ./platform/evals
+        run: |
+          uv add "portia-sdk-python[all] @ file://../../portia-sdk-python"
+
+      - name: Eval query planner
+        id: eval_query_planner
+        working-directory: ./platform/evals
+        env:
+          LANGCHAIN_TRACING_V2: "true"
+          LANGCHAIN_ENDPOINT: "https://api.smith.langchain.com"
+          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+          LANGCHAIN_PROJECT: ${{ vars.LANGCHAIN_PROJECT }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          PORTIA_API_KEY: ${{ secrets.PORTIA_EVAL_API_KEY }}
+          PORTIA_API_ENDPOINT: ${{ secrets.PORTIA_EVAL_API_ENDPOINT }}
+          LLM_REDIS_CACHE_URL: ${{ secrets.LLM_REDIS_CACHE_URL }}
+        run: |
+          EVAL_OUTPUT=$(uv run cli.py query-planner eval --provider=google --threshold_file=query_planner/thresholds/gemini-2.5-pro/thresholds_local.yaml --reps 1 --metadata "pr=${{ github.event.pull_request.number }},author=${{ github.event.pull_request.user.login || github.actor }},run=${{ github.event_name == 'push' && 'main' || 'pr' }},env=local,repo=sdk" --slice_name main  --max_concurrency 25)
+          echo "eval_url=$(echo "$EVAL_OUTPUT" | grep -o '${LANGCHAIN_ENDPOINT}/.*')" >> $GITHUB_OUTPUT
+          echo "eval_name=$(echo "$EVAL_OUTPUT" | grep -oP "experiment:\s*'\K[^']+")" >> $GITHUB_OUTPUT
+          if echo "$EVAL_OUTPUT" | grep -q "EVAL BREACH"; then
+            BREACHES=$(echo "$EVAL_OUTPUT" | grep "EVAL BREACH:" | tr '\n' ' ' | sed 's/"/\\"/g')
+            echo "metric_breaches=${BREACHES}" >> $GITHUB_OUTPUT
+            echo "has_failing_eval_planner_scores=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Eval agent (execution)
+        id: eval_execution_agent
+        working-directory: ./platform/evals
+        env:
+          LANGCHAIN_TRACING_V2: "true"
+          LANGCHAIN_ENDPOINT: "https://api.smith.langchain.com"
+          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+          LANGCHAIN_PROJECT: ${{ vars.LANGCHAIN_PROJECT }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          PORTIA_API_KEY: ${{ secrets.PORTIA_EVAL_API_KEY }}
+          PORTIA_API_ENDPOINT: ${{ secrets.PORTIA_EVAL_API_ENDPOINT }}
+          LLM_REDIS_CACHE_URL: ${{ secrets.LLM_REDIS_CACHE_URL }}
+        run: |
+          EVAL_OUTPUT=$(uv run cli.py agent eval --slice_name=main --provider=google --threshold_file=execution/thresholds/gemini-2.5-flash/thresholds_local.yaml --reps 1 --metadata "pr=${{ github.event.pull_request.number }},author=${{ github.event.pull_request.user.login || github.actor }},run=${{ github.event_name == 'push' && 'main' || 'pr' }},env=local,repo=sdk"  --max_concurrency 25)
+          echo $EVAL_OUTPUT
+          echo "eval_url=$(echo "$EVAL_OUTPUT" | grep -o 'https://smith.langchain.com/.*')" >> $GITHUB_OUTPUT
+          echo "eval_name=$(echo "$EVAL_OUTPUT" | grep -oP "experiment:\s*'\K[^']+")" >> $GITHUB_OUTPUT
+          echo "eval_name: $EVAL_OUTPUT"
+          if echo "$EVAL_OUTPUT" | grep -q "EVAL BREACH"; then
+            BREACHES=$(echo "$EVAL_OUTPUT" | grep "EVAL BREACH:" | tr '\n' ' ' | sed 's/"/\\"/g')
+            echo "BREACHES: $BREACHES"
+            echo "metric_breaches=${BREACHES}" >> $GITHUB_OUTPUT
+            echo "has_failing_eval_agent_scores=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Eval agent (introspection)
+        id: eval_agent_introspection
+        working-directory: ./platform/evals
+        env:
+          LANGCHAIN_TRACING_V2: "true"
+          LANGCHAIN_ENDPOINT: "https://api.smith.langchain.com"
+          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+          LANGCHAIN_PROJECT: ${{ vars.LANGCHAIN_PROJECT }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          PORTIA_API_KEY: ${{ secrets.PORTIA_EVAL_API_KEY }}
+          PORTIA_API_ENDPOINT: ${{ secrets.PORTIA_EVAL_API_ENDPOINT }}
+          LLM_REDIS_CACHE_URL: ${{ secrets.LLM_REDIS_CACHE_URL }}
+        run: |
+          EVAL_OUTPUT=$(uv run cli.py introspection eval --slice_name=main --provider=google --threshold_file=introspection/thresholds/gemini-2.5-flash/thresholds_local.yaml --reps 1 --metadata "pr=${{ github.event.pull_request.number }},author=${{ github.event.pull_request.user.login || github.actor }},run=${{ github.event_name == 'push' && 'main' || 'pr' }},env=local,repo=sdk"  --max_concurrency 25)
+          echo "eval_url=$(echo "$EVAL_OUTPUT" | grep -o 'https://smith.langchain.com/.*')" >> $GITHUB_OUTPUT
+          echo "eval_name=$(echo "$EVAL_OUTPUT" | grep -oP "experiment:\s*'\K[^']+")" >> $GITHUB_OUTPUT
+          if echo "$EVAL_OUTPUT" | grep -q "EVAL BREACH"; then
+            BREACHES=$(echo "$EVAL_OUTPUT" | grep "EVAL BREACH:" | tr '\n' ' ' | sed 's/"/\\"/g')
+            echo "BREACHES: $BREACHES"
+            echo "metric_breaches=${BREACHES}" >> $GITHUB_OUTPUT
+            echo "has_failing_eval_introspection_scores=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary results
+        id: summary_results
+        working-directory: ./platform/evals
+        env:
+          LANGCHAIN_TRACING_V2: "true"
+          LANGCHAIN_ENDPOINT: "https://api.smith.langchain.com"
+          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+          LANGCHAIN_PROJECT: ${{ vars.LANGCHAIN_PROJECT }}
+          PORTIA_API_KEY: ${{ secrets.PORTIA_EVAL_API_KEY }}
+          PORTIA_API_ENDPOINT: ${{ secrets.PORTIA_EVAL_API_ENDPOINT }}
+          EXECUTION_AGENT_EXPERIMENT_ID: ${{ steps.eval_execution_agent.outputs.eval_name }}
+          QUERY_PLANNER_EXPERIMENT_ID: ${{ steps.eval_query_planner.outputs.eval_name }}
+          INTROSPECTION_AGENT_EXPERIMENT_ID: ${{ steps.eval_agent_introspection.outputs.eval_name }}
+        run: |
+          echo "EXECUTION_AGENT_EXPERIMENT_ID: $EXECUTION_AGENT_EXPERIMENT_ID"
+          echo "QUERY_PLANNER_EXPERIMENT_ID: $QUERY_PLANNER_EXPERIMENT_ID"
+          echo "INTROSPECTION_AGENT_EXPERIMENT_ID: $INTROSPECTION_AGENT_EXPERIMENT_ID"
+          uv run jupyter nbconvert --to markdown --execute analysis/github_analysis.ipynb --output notebook_output.md --no-input
+          # Removes style blocks that GitHub won't render properly
+          sed -i '/<style[^>]*>/,/<\/style>/d' analysis/notebook_output.md
+          cat analysis/notebook_output.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Check for evaluation failures
+        run: |
+          CONTAINS_THRESHOLD_BREACH=false
+
+          # Check if the query planner has failing scores
+          if [[ "${{ steps.eval_query_planner.outputs.has_failing_eval_planner_scores }}" == "true" ]]; then
+            echo "Query planner eval failed or has breaches."
+            echo "Breaches: ${{ steps.eval_query_planner.outputs.metric_breaches }}"
+            CONTAINS_THRESHOLD_BREACH=true
+          fi
+
+          # Check if the execution agent has failing scores
+          if [[ "${{ steps.eval_execution_agent.outputs.has_failing_eval_agent_scores }}" == "true" ]]; then
+            echo "Execution agent failed or has breaches."
+            echo "Breaches: ${{ steps.eval_execution_agent.outputs.metric_breaches }}"
+            CONTAINS_THRESHOLD_BREACH=true
+          fi
+
+          # Check if the introspection agent has failing scores
+          if [[ "${{ steps.eval_agent_introspection.outputs.has_failing_eval_introspection_scores }}" == "true" ]]; then
+            echo "Introspection agent failed or has breaches."
+            echo "Breaches: ${{ steps.eval_agent_introspection.outputs.metric_breaches }}"
+            CONTAINS_THRESHOLD_BREACH=true
+          fi
+
+          # Exit with a non-zero status if any failures were detected
+          if [[ "$CONTAINS_THRESHOLD_BREACH" == "true" ]]; then
+            echo "One or more evaluations failed."
+            exit 1
+          fi
+
+
+      - name: Setup Redis CLI
+        if: failure()
+        uses: shogo82148/actions-setup-redis@v1
+      - name: Clear LLM cache
+        if: failure()
+        working-directory: ./platform
+        run: |
+          echo "LLM_REDIS_CACHE_URL=${{ secrets.LLM_REDIS_CACHE_URL }}" > .env
+          ./scripts/clear_llm_cache.sh
