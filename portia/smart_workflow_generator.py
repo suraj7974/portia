@@ -133,43 +133,41 @@ class SmartWorkflowGenerator:
             - Return ONLY valid JSON, no explanations
             """
 
-            # Run AI analysis
+            # Run AI analysis using Portia with Google
             end_user = EndUser(external_id="workflow-analyzer")
             result = portia.run(query=analysis_prompt, end_user=end_user)
 
-            # Extract the generated workflow JSON
-            if result.outputs.final_output:
-                ai_response = result.outputs.final_output.get_value()
+            if not result.outputs.final_output:
+                raise ValueError("No AI response received from Portia")
 
+            ai_response = result.outputs.final_output.get_value()
+
+            if ai_response:
                 # Try to parse the AI response as JSON
-                if ai_response:
-                    try:
-                        # Clean up the response (remove any markdown or extra text)
-                        json_start = ai_response.find("{")
-                        json_end = ai_response.rfind("}") + 1
+                try:
+                    # Clean up the response (remove any markdown or extra text)
+                    json_start = ai_response.find("{")
+                    json_end = ai_response.rfind("}") + 1
 
-                        if json_start >= 0 and json_end > json_start:
-                            json_str = ai_response[json_start:json_end]
-                            workflow_data = json.loads(json_str)
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = ai_response[json_start:json_end]
+                        workflow_data = json.loads(json_str)
 
-                            # Clean the workflow data for n8n API
-                            cleaned_workflow = self.clean_workflow_for_n8n(workflow_data)
+                        # Clean the workflow data for n8n API
+                        cleaned_workflow = self.clean_workflow_for_n8n(workflow_data)
 
-                            click.echo(
-                                f"🤖 AI generated workflow with {len(cleaned_workflow.get('nodes', []))} nodes"
-                            )
-                            return cleaned_workflow
-                        else:
-                            raise ValueError("No valid JSON found in AI response")
+                        click.echo(
+                            f"🤖 AI generated workflow with {len(cleaned_workflow.get('nodes', []))} nodes"
+                        )
+                        return cleaned_workflow
+                    else:
+                        raise ValueError("No valid JSON found in AI response")
 
-                    except (json.JSONDecodeError, ValueError) as e:
-                        click.echo(f"⚠️ AI response parsing failed: {e}")
-                        if ai_response:
-                            click.echo(f"AI Response: {ai_response[:200]}...")
-                        # Fallback to simple workflow
-                        return self.create_fallback_workflow(description)
-                else:
-                    click.echo("⚠️ Empty AI response")
+                except (json.JSONDecodeError, ValueError) as e:
+                    click.echo(f"⚠️ AI response parsing failed: {e}")
+                    if ai_response:
+                        click.echo(f"AI Response: {ai_response[:200]}...")
+                    # Fallback to simple workflow
                     return self.create_fallback_workflow(description)
             else:
                 click.echo("⚠️ No AI response received")
@@ -181,15 +179,15 @@ class SmartWorkflowGenerator:
 
     def clean_workflow_for_n8n(self, workflow_data: Dict[str, Any]) -> Dict[str, Any]:
         """Clean workflow data to remove properties that n8n API doesn't accept."""
-        
+
         # Only keep the essential properties that n8n expects
         cleaned = {
             "name": workflow_data.get("name", "ai-workflow"),
             "nodes": [],
             "connections": {},
-            "settings": workflow_data.get("settings", {"executionOrder": "v1"})
+            "settings": workflow_data.get("settings", {"executionOrder": "v1"}),
         }
-        
+
         # Clean each node to only include valid properties
         for node in workflow_data.get("nodes", []):
             cleaned_node = {
@@ -198,10 +196,10 @@ class SmartWorkflowGenerator:
                 "typeVersion": node.get("typeVersion", 1),
                 "position": node.get("position", [20, 20]),
                 "id": node.get("id", f"node-{len(cleaned['nodes'])}"),
-                "name": node.get("name", "Unnamed Node")
+                "name": node.get("name", "Unnamed Node"),
             }
             cleaned["nodes"].append(cleaned_node)
-        
+
         # Fix connections format - convert array to object if needed
         connections = workflow_data.get("connections", {})
         if isinstance(connections, list):
@@ -211,33 +209,39 @@ class SmartWorkflowGenerator:
                 # Handle both simple format and nested format
                 if "from" in conn and "to" in conn:
                     # Nested format: {"from": {"node": "X"}, "to": {"node": "Y"}}
-                    from_node = conn["from"].get("node") if isinstance(conn["from"], dict) else conn["from"]
-                    to_node = conn["to"].get("node") if isinstance(conn["to"], dict) else conn["to"]
+                    from_node = (
+                        conn["from"].get("node")
+                        if isinstance(conn["from"], dict)
+                        else conn["from"]
+                    )
+                    to_node = (
+                        conn["to"].get("node")
+                        if isinstance(conn["to"], dict)
+                        else conn["to"]
+                    )
                 else:
                     # Simple format: {"from": "node1", "to": "node2"}
                     from_node = conn.get("from")
                     to_node = conn.get("to")
-                
+
                 from_handle = conn.get("fromHandle", "main")
                 to_handle = conn.get("toHandle", "main")
                 to_index = conn.get("toIndex", 0)
-                
+
                 if from_node and to_node:
                     if from_node not in new_connections:
                         new_connections[from_node] = {}
                     if from_handle not in new_connections[from_node]:
                         new_connections[from_node][from_handle] = []
-                    
-                    new_connections[from_node][from_handle].append({
-                        "node": to_node,
-                        "type": to_handle,
-                        "index": to_index
-                    })
-            
+
+                    new_connections[from_node][from_handle].append(
+                        {"node": to_node, "type": to_handle, "index": to_index}
+                    )
+
             cleaned["connections"] = new_connections
         else:
             cleaned["connections"] = connections
-        
+
         return cleaned
 
     def create_fallback_workflow(self, description: str) -> Dict[str, Any]:
@@ -358,16 +362,16 @@ class SmartWorkflowGenerator:
             click.echo(
                 f"      {i+1}. {node.get('name', 'Unnamed')} ({node.get('type', 'Unknown')})"
             )
-        
+
         # Count connections safely
-        connections = workflow_data.get('connections', {})
+        connections = workflow_data.get("connections", {})
         if isinstance(connections, list):
             connection_count = len(connections)
         elif isinstance(connections, dict):
             connection_count = len(connections)
         else:
             connection_count = 0
-        
+
         click.echo(f"   🔗 Connections: {connection_count} groups")
 
         # Ask for confirmation
